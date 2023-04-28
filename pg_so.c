@@ -75,7 +75,7 @@ static void do_disconnect(PGconn *conn)
     PQfinish(conn);
 }
 
-static char* do_exec1(PGconn *conn, char *query, char *param)
+static char* do_exec11(PGconn *conn, char *query, char *param)
 {
     PGresult   *res;
     const char *paramValues[2];
@@ -88,6 +88,10 @@ static char* do_exec1(PGconn *conn, char *query, char *param)
     char	*result;
 
     paramValues[0] = param; 
+
+    /*
+     * EXECUTE
+     */
 
     res = PQexecParams(conn,
 		       query,
@@ -144,6 +148,93 @@ static char* do_exec1(PGconn *conn, char *query, char *param)
     return result;
 }
 
+static int do_exec12(PGconn *conn, char *query, char *param, char **param_out_1, char **param_out_2)
+{
+    PGresult   *res;
+    const char *paramValues[2];
+    int         paramLengths[2];
+    int         paramFormats[2];
+    uint32_t    binaryIntVal;
+    int		nFields;
+    int		i;
+    int		j;
+    char	*result1;
+    char	*result2;
+
+    paramValues[0] = param; 
+
+    /*
+     * EXECUTE
+     */
+
+    res = PQexecParams(conn,
+		       query,
+                       1,       /* number of parameters */
+                       NULL,    /* let the backend deduce param type */
+                       paramValues,
+                       NULL,    /* don't need param lengths since text */
+                       NULL,    /* default to all text params */
+                       0);      /* ask for text results */
+
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK)
+    {
+        fprintf(stderr, "PQexecParams failed: %s", PQerrorMessage(conn));
+        PQclear(res);
+        exit_nicely(conn);
+    }
+
+    result1 = (char *)malloc(MAX_LENGTH);
+    if (result1 == NULL)
+    {
+	fprintf(stderr, "malloc %d failed \n");
+	exit_nicely(conn);
+    }
+
+    result2 = (char *)malloc(MAX_LENGTH);
+    if (result2 == NULL)
+    {
+	fprintf(stderr, "malloc %d failed \n");
+	exit_nicely(conn);
+    }
+
+    /*
+     * FETCH: retrieve results
+     */
+
+    /* first, print out the attribute names */
+    nFields = PQnfields(res);
+    for (i = 0; i < nFields; i++)
+        printf("%-15s", PQfname(res, i));
+    printf("\n\n");
+
+    /* next, print out the rows */
+    for (i = 0; i < PQntuples(res); i++)
+    {
+        for (j = 0; j < nFields; j++)
+	{
+            printf("%-15s", PQgetvalue(res, i, j));
+	    if (i == 0 && j == 0)
+		   strcpy(result1, PQgetvalue(res, i, j)); 
+	    if (i == 0 && j == 1)
+		   strcpy(result2, PQgetvalue(res, i, j)); 
+	}
+        printf("\n");
+    }
+
+    if (PQntuples(res) == 0)
+	    return 1;
+
+    param_out_1 = &result1;
+    param_out_2 = &result2;
+
+    /*
+     * free resources before exit
+     */
+    PQclear(res);
+
+    return 0;
+}
 int
 main(int argc, char **argv)
 {
@@ -151,19 +242,34 @@ main(int argc, char **argv)
     PGconn     *conn;
     char dd_param_name[MAX_LENGTH];
     char *dd_param_value;
+    char *ru_param_value;
+    char *ca_param_value;
+    char be_param_name[MAX_LENGTH];
+    int rc;
 
-    /*
-     * EXECUTE
-     */
 
     conn = do_connect(argc, argv);
+
     strcpy(dd_param_name, "data_directory"); 
   
-    dd_param_value = do_exec1(conn,  
+    dd_param_value = do_exec11(conn,  
                               "SELECT setting FROM pg_settings WHERE name=$1",
 			      dd_param_name);
 
     printf("dd_param_value=%s\n", dd_param_value);
+
+    strcpy(be_param_name, "walsender");
+    rc = do_exec12(conn,
+                  "SELECT usename, client_addr FROM pg_stat_activity WHERE backend_type=$1",
+                  be_param_name, &ru_param_value, &ca_param_value);
+
+    if (rc == 1)
+    {	
+	    fprintf(stderr, "ERROR: Cannot find standby \n");
+	    exit_nicely(conn);
+    }    
+
+
     do_disconnect(conn);
 
     return 0;
