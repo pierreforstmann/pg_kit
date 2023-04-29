@@ -75,6 +75,76 @@ static void do_disconnect(PGconn *conn)
     PQfinish(conn);
 }
 
+static int do_system(char *command)
+{
+   int rc;
+
+   rc = system(command);
+   printf("system rc=%d \n", rc);
+}
+
+static int do_exec(PGconn *conn, char *stmt)
+{
+    PGresult   *res;
+    int         nFields;
+    int         i;
+    int         j;
+    char        *result;
+
+    /*
+     * EXECUTE
+     */
+
+    res = PQexec(conn, stmt);
+
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+    {
+        fprintf(stderr, "PQexec failed: %s", PQerrorMessage(conn));
+        PQclear(res);
+        exit_nicely(conn);
+    }
+
+     /*
+     * free resources before exit
+     */
+
+    PQclear(res);
+
+    return 0;
+
+}
+
+static int do_exec00(PGconn *conn, char *query)
+{
+    PGresult   *res;
+    int		nFields;
+    int		i;
+    int		j;
+    char	*result;
+
+    /*
+     * EXECUTE
+     */
+
+    res = PQexec(conn, query);
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK)
+    {
+        fprintf(stderr, "PQexec failed: %s", PQerrorMessage(conn));
+        PQclear(res);
+        exit_nicely(conn);
+    }
+
+     /*
+     * free resources before exit
+     */
+
+    PQclear(res); 
+
+    return 0;
+}
+
+
 static char* do_exec11(PGconn *conn, char *query, char *param)
 {
     PGresult   *res;
@@ -158,8 +228,6 @@ static int do_exec12(PGconn *conn, char *query, char *param, char **param_out_1,
     int		nFields;
     int		i;
     int		j;
-    char	*result1;
-    char	*result2;
 
     paramValues[0] = param; 
 
@@ -184,20 +252,6 @@ static int do_exec12(PGconn *conn, char *query, char *param, char **param_out_1,
         exit_nicely(conn);
     }
 
-    result1 = (char *)malloc(MAX_LENGTH);
-    if (result1 == NULL)
-    {
-	fprintf(stderr, "malloc %d failed \n");
-	exit_nicely(conn);
-    }
-
-    result2 = (char *)malloc(MAX_LENGTH);
-    if (result2 == NULL)
-    {
-	fprintf(stderr, "malloc %d failed \n");
-	exit_nicely(conn);
-    }
-
     /*
      * FETCH: retrieve results
      */
@@ -215,18 +269,15 @@ static int do_exec12(PGconn *conn, char *query, char *param, char **param_out_1,
 	{
             printf("%-15s", PQgetvalue(res, i, j));
 	    if (i == 0 && j == 0)
-		   strcpy(result1, PQgetvalue(res, i, j)); 
+		   strcpy(*param_out_1, PQgetvalue(res, i, j)); 
 	    if (i == 0 && j == 1)
-		   strcpy(result2, PQgetvalue(res, i, j)); 
+		   strcpy(*param_out_2, PQgetvalue(res, i, j)); 
 	}
         printf("\n");
     }
 
     if (PQntuples(res) == 0)
 	    return 1;
-
-    param_out_1 = &result1;
-    param_out_2 = &result2;
 
     /*
      * free resources before exit
@@ -245,6 +296,7 @@ main(int argc, char **argv)
     char *ru_param_value;
     char *ca_param_value;
     char be_param_name[MAX_LENGTH];
+    char command[MAX_LENGTH];
     int rc;
 
 
@@ -258,6 +310,21 @@ main(int argc, char **argv)
 
     printf("dd_param_value=%s\n", dd_param_value);
 
+    ru_param_value = (char *)malloc(MAX_LENGTH);
+    if (ru_param_value == NULL)
+    {
+	fprintf(stderr, "malloc %d failed \n");
+	exit_nicely(conn);
+    }
+
+    ca_param_value = (char *)malloc(MAX_LENGTH);
+    if (ca_param_value == NULL)
+    {
+	fprintf(stderr, "malloc %d failed \n");
+	exit_nicely(conn);
+    }
+
+
     strcpy(be_param_name, "walsender");
     rc = do_exec12(conn,
                   "SELECT usename, client_addr FROM pg_stat_activity WHERE backend_type=$1",
@@ -269,6 +336,30 @@ main(int argc, char **argv)
 	    exit_nicely(conn);
     }    
 
+    printf("ru_param_value=%s\n", ru_param_value);
+    printf("ca_param_value=%s\n", ca_param_value);
+
+    do_exec00(conn, "SELECT pg_switch_wal();");
+
+    do_exec(conn, "checkpoint;");
+
+    command[0]='\0'; 
+    strcpy(command, "ALTER SYSTEM SET primary_conninfo='host=");
+    strcat(command, ca_param_value);
+    strcat(command, " user=");
+    strcat(command, ru_param_value);
+    strcat(command, "'");
+    do_exec(conn, command);
+
+    do_system("pg_ctl stop");
+
+    command[0]='\0';
+    strcpy(command, "touch "); 
+    strcat(command, dd_param_value);
+    strcat(command, "/standby.signal");
+    do_system(command);
+
+    do_system("pg_ctl start");
 
     do_disconnect(conn);
 
