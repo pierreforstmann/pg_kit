@@ -30,21 +30,12 @@ exit_nicely(PGconn *conn)
     exit(1);
 }
 
-static PGconn* do_connect(int argc, char **argv)
+static PGconn* do_local_connect()
 {
     const char *conninfo;
     PGconn     *conn;
-    PGresult   *res;
 
-    /*
-     * If the user supplies a parameter on the command line, use it as the
-     * conninfo string; otherwise default to setting dbname=postgres and using
-     * environment variables or defaults for all other connection parameters.
-     */
-    if (argc > 1)
-        conninfo = argv[1];
-    else
-        conninfo = "dbname = postgres";
+    conninfo = "dbname = postgres";
 
     /* Make a connection to the database */
     conn = PQconnectdb(conninfo);
@@ -52,19 +43,33 @@ static PGconn* do_connect(int argc, char **argv)
     /* Check to see that the backend connection was successfully made */
     if (PQstatus(conn) != CONNECTION_OK)
     {
-        fprintf(stderr, "%s", PQerrorMessage(conn));
+        fprintf(stderr, "%s \n", PQerrorMessage(conn));
         exit_nicely(conn);
     }
 
-    /* Set always-secure search path, so malicious users can't take control. */
-    res = PQexec(conn, "SET search_path = test1");
-    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+    return conn;
+}
+
+static PGconn* do_remote_connect(char *hostname, char *port)
+{
+    char conninfo[MAX_LENGTH];
+    PGconn     *conn;
+
+    strcpy(conninfo, "postgresql://postgres@");
+    strcat(conninfo, hostname);
+    strcat(conninfo, ":");
+    strcat(conninfo, port);
+    strcat(conninfo, "/postgres");
+
+    /* Make a connection to the database */
+    conn = PQconnectdb(conninfo);
+
+    /* Check to see that the backend connection was successfully made */
+    if (PQstatus(conn) != CONNECTION_OK)
     {
-        fprintf(stderr, "SET failed: %s", PQerrorMessage(conn));
-        PQclear(res);
+        fprintf(stderr, "%s \n", PQerrorMessage(conn));
         exit_nicely(conn);
     }
-    PQclear(res);
 
     return conn;
 }
@@ -81,6 +86,8 @@ static int do_system(char *command)
 
    rc = system(command);
    printf("system rc=%d \n", rc);
+   
+   return rc;
 }
 
 static int do_exec(PGconn *conn, char *stmt)
@@ -99,7 +106,7 @@ static int do_exec(PGconn *conn, char *stmt)
 
     if (PQresultStatus(res) != PGRES_COMMAND_OK)
     {
-        fprintf(stderr, "PQexec failed: %s", PQerrorMessage(conn));
+        fprintf(stderr, "PQexec failed: %s\n", PQerrorMessage(conn));
         PQclear(res);
         exit_nicely(conn);
     }
@@ -130,7 +137,7 @@ static int do_exec00(PGconn *conn, char *query)
 
     if (PQresultStatus(res) != PGRES_TUPLES_OK)
     {
-        fprintf(stderr, "PQexec failed: %s", PQerrorMessage(conn));
+        fprintf(stderr, "PQexec failed: %s \n", PQerrorMessage(conn));
         PQclear(res);
         exit_nicely(conn);
     }
@@ -175,7 +182,7 @@ static char* do_exec11(PGconn *conn, char *query, char *param)
 
     if (PQresultStatus(res) != PGRES_TUPLES_OK)
     {
-        fprintf(stderr, "PQexecParams failed: %s", PQerrorMessage(conn));
+        fprintf(stderr, "PQexecParams failed: %s \n", PQerrorMessage(conn));
         PQclear(res);
         exit_nicely(conn);
     }
@@ -289,22 +296,36 @@ static int do_exec12(PGconn *conn, char *query, char *param, char **param_out_1,
 int
 main(int argc, char **argv)
 {
-    const char *conninfo;
-    PGconn     *conn;
+    PGconn     *conn_p;
+    PGconn     *conn_s;
     char dd_param_name[MAX_LENGTH];
     char *dd_param_value;
     char *ru_param_value;
     char *ca_param_value;
     char be_param_name[MAX_LENGTH];
     char command[MAX_LENGTH];
+    char port_s[5];
     int rc;
 
+    if (argc > 2)
+    {
+	    fprintf(stderr, "usage: pg_so [<standby_port] \n");
+	    exit(1);
+    }
 
-    conn = do_connect(argc, argv);
+    if (argc == 1)
+	 strcpy(port_s, "5432");
+    else strcpy(port_s, argv[1]);
+
+    /*
+     * PRIMARY
+     */
+
+    conn_p = do_local_connect();
 
     strcpy(dd_param_name, "data_directory"); 
   
-    dd_param_value = do_exec11(conn,  
+    dd_param_value = do_exec11(conn_p,  
                               "SELECT setting FROM pg_settings WHERE name=$1",
 			      dd_param_name);
 
@@ -314,42 +335,44 @@ main(int argc, char **argv)
     if (ru_param_value == NULL)
     {
 	fprintf(stderr, "malloc %d failed \n");
-	exit_nicely(conn);
+	exit_nicely(conn_p);
     }
 
     ca_param_value = (char *)malloc(MAX_LENGTH);
     if (ca_param_value == NULL)
     {
 	fprintf(stderr, "malloc %d failed \n");
-	exit_nicely(conn);
+	exit_nicely(conn_p);
     }
 
 
     strcpy(be_param_name, "walsender");
-    rc = do_exec12(conn,
+    rc = do_exec12(conn_p,
                   "SELECT usename, client_addr FROM pg_stat_activity WHERE backend_type=$1",
                   be_param_name, &ru_param_value, &ca_param_value);
 
     if (rc == 1)
     {	
 	    fprintf(stderr, "ERROR: Cannot find standby \n");
-	    exit_nicely(conn);
+	    exit_nicely(conn_p);
     }    
 
     printf("ru_param_value=%s\n", ru_param_value);
     printf("ca_param_value=%s\n", ca_param_value);
 
-    do_exec00(conn, "SELECT pg_switch_wal();");
+    do_exec00(conn_p, "SELECT pg_switch_wal();");
 
-    do_exec(conn, "checkpoint;");
+    do_exec(conn_p, "checkpoint;");
 
     command[0]='\0'; 
     strcpy(command, "ALTER SYSTEM SET primary_conninfo='host=");
     strcat(command, ca_param_value);
+    strcat(command, " port=");
+    strcat(command, port_s);
     strcat(command, " user=");
     strcat(command, ru_param_value);
     strcat(command, "'");
-    do_exec(conn, command);
+    do_exec(conn_p, command);
 
     do_system("pg_ctl stop");
 
@@ -361,7 +384,14 @@ main(int argc, char **argv)
 
     do_system("pg_ctl start");
 
-    do_disconnect(conn);
+    do_disconnect(conn_p);
+
+    /*
+     * STANDBY
+     */
+
+    conn_s = do_remote_connect(ca_param_value, port_s);
+    do_exec00(conn_s, "SELECT pg_promote();");
 
     return 0;
 }
