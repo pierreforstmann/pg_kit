@@ -23,8 +23,42 @@
 
 #define MAX_LENGTH 128
 
-static void
-exit_nicely(PGconn *conn)
+static void abort_nicely()
+{
+    exit(1);
+}
+
+char *build_string(char *format, char *p1, char *p2, char *p3)
+{
+    int size;
+    char *output;
+
+    if (p2 == NULL && p3 == NULL)
+        size = snprintf(0, 0, format, p1);
+    else if (p3 == NULL)
+        size = snprintf(0, 0, format, p1, p2);
+    else 
+        size = snprintf(0, 0, format, p1, p2, p3);
+
+    output = (char *)malloc(size + 1); 
+    if (output == NULL)
+    {
+        fprintf(stderr, "build_string: malloc failed for %s=\n", format);
+        abort_nicely();
+    }
+
+    if (p2 == NULL && p3 == NULL)
+        snprintf(output, size + 1, format, p1);
+    else if (p3 == NULL)
+        snprintf(output, size + 1, format, p1, p2);
+    else
+        snprintf(output, size + 1, format, p1, p2, p3);
+
+    return output;
+
+}
+
+static void exit_nicely(PGconn *conn)
 {
     PQfinish(conn);
     exit(1);
@@ -44,7 +78,7 @@ static PGconn* do_local_connect()
     if (PQstatus(conn) != CONNECTION_OK)
     {
         fprintf(stderr, "%s \n", PQerrorMessage(conn));
-        exit_nicely(conn);
+	exit_nicely(conn);
     }
 
     return conn;
@@ -52,14 +86,11 @@ static PGconn* do_local_connect()
 
 static PGconn* do_remote_connect(char *hostname, char *port)
 {
-    char conninfo[MAX_LENGTH];
+    char *conninfo;
+    int  size;
     PGconn     *conn;
 
-    strcpy(conninfo, "postgresql://postgres@");
-    strcat(conninfo, hostname);
-    strcat(conninfo, ":");
-    strcat(conninfo, port);
-    strcat(conninfo, "/postgres");
+    conninfo  = build_string("postgresql://postgres@%s:%s/postgres", hostname, port, NULL);
 
     /* Make a connection to the database */
     conn = PQconnectdb(conninfo);
@@ -197,14 +228,7 @@ static char* do_exec11(PGconn *conn, char *query, char *param)
     /*
      * FETCH: retrieve results
      */
-
-    /* first, print out the attribute names */
     nFields = PQnfields(res);
-    for (i = 0; i < nFields; i++)
-        printf("%-15s", PQfname(res, i));
-    printf("\n\n");
-
-    /* next, print out the rows */
     for (i = 0; i < PQntuples(res); i++)
     {
         for (j = 0; j < nFields; j++)
@@ -263,13 +287,7 @@ static int do_exec12(PGconn *conn, char *query, char *param, char **param_out_1,
      * FETCH: retrieve results
      */
 
-    /* first, print out the attribute names */
     nFields = PQnfields(res);
-    for (i = 0; i < nFields; i++)
-        printf("%-15s", PQfname(res, i));
-    printf("\n\n");
-
-    /* next, print out the rows */
     for (i = 0; i < PQntuples(res); i++)
     {
         for (j = 0; j < nFields; j++)
@@ -303,7 +321,7 @@ main(int argc, char **argv)
     char *ru_param_value;
     char *ca_param_value;
     char be_param_name[MAX_LENGTH];
-    char command[MAX_LENGTH];
+    char *command;
     char port_s[5];
     int rc;
 
@@ -357,29 +375,18 @@ main(int argc, char **argv)
 	    exit_nicely(conn_p);
     }    
 
-    printf("ru_param_value=%s\n", ru_param_value);
-    printf("ca_param_value=%s\n", ca_param_value);
 
     do_exec00(conn_p, "SELECT pg_switch_wal();");
 
     do_exec(conn_p, "checkpoint;");
 
-    command[0]='\0'; 
-    strcpy(command, "ALTER SYSTEM SET primary_conninfo='host=");
-    strcat(command, ca_param_value);
-    strcat(command, " port=");
-    strcat(command, port_s);
-    strcat(command, " user=");
-    strcat(command, ru_param_value);
-    strcat(command, "'");
+    command = build_string("ALTER SYSTEM SET primary_conninfo='host=%s port=%s user=%s'", ca_param_value, port_s, ru_param_value);
+    printf("command=%s\n", command);
     do_exec(conn_p, command);
 
     do_system("pg_ctl stop");
 
-    command[0]='\0';
-    strcpy(command, "touch "); 
-    strcat(command, dd_param_value);
-    strcat(command, "/standby.signal");
+    command = build_string("touch %s/standby.signal", dd_param_value, NULL, NULL);
     do_system(command);
 
     do_system("pg_ctl start");
