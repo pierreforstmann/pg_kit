@@ -28,12 +28,28 @@ static void abort_nicely()
     exit(1);
 }
 
+char *build_string0()
+{
+	char *output;
+        
+        output = (char *)malloc(MAX_LENGTH + 1); 
+        if (output == NULL)
+        {
+            fprintf(stderr, "build_string: malloc failed for size=%d\n", MAX_LENGTH + 1);
+            abort_nicely();
+        }
+
+	return output;
+}
+
 char *build_string(char *format, char *p1, char *p2, char *p3)
 {
     int size;
     char *output;
-
-    if (p2 == NULL && p3 == NULL)
+    
+    if (p1 == NULL && p2 == NULL && p3  == NULL)
+	size = snprintf(0, 0, format);
+    else if (p2 == NULL && p3 == NULL)
         size = snprintf(0, 0, format, p1);
     else if (p3 == NULL)
         size = snprintf(0, 0, format, p1, p2);
@@ -47,6 +63,8 @@ char *build_string(char *format, char *p1, char *p2, char *p3)
         abort_nicely();
     }
 
+    if (p1 == NULL && p2 == NULL && p3 == NULL)
+        snprintf(output, size + 1, format);
     if (p2 == NULL && p3 == NULL)
         snprintf(output, size + 1, format, p1);
     else if (p3 == NULL)
@@ -116,7 +134,11 @@ static int do_system(char *command)
    int rc;
 
    rc = system(command);
-   printf("system rc=%d \n", rc);
+   if (rc != 0)
+   {
+	fprintf(stderr, "%s failed - return code=%d\n", command, rc);
+        abort_nicely();
+   }
    
    return rc;
 }
@@ -316,11 +338,11 @@ main(int argc, char **argv)
 {
     PGconn     *conn_p;
     PGconn     *conn_s;
-    char dd_param_name[MAX_LENGTH];
+    char *dd_param_name;
     char *dd_param_value;
     char *ru_param_value;
     char *ca_param_value;
-    char be_param_name[MAX_LENGTH];
+    char *be_param_name = "walsender";
     char *command;
     char port_s[5];
     int rc;
@@ -341,7 +363,7 @@ main(int argc, char **argv)
 
     conn_p = do_local_connect();
 
-    strcpy(dd_param_name, "data_directory"); 
+    dd_param_name = build_string("data_directory", NULL, NULL, NULL);
   
     dd_param_value = do_exec11(conn_p,  
                               "SELECT setting FROM pg_settings WHERE name=$1",
@@ -349,22 +371,9 @@ main(int argc, char **argv)
 
     printf("dd_param_value=%s\n", dd_param_value);
 
-    ru_param_value = (char *)malloc(MAX_LENGTH);
-    if (ru_param_value == NULL)
-    {
-	fprintf(stderr, "malloc %d failed \n");
-	exit_nicely(conn_p);
-    }
+    ru_param_value = build_string0();
+    ca_param_value = build_string0();
 
-    ca_param_value = (char *)malloc(MAX_LENGTH);
-    if (ca_param_value == NULL)
-    {
-	fprintf(stderr, "malloc %d failed \n");
-	exit_nicely(conn_p);
-    }
-
-
-    strcpy(be_param_name, "walsender");
     rc = do_exec12(conn_p,
                   "SELECT usename, client_addr FROM pg_stat_activity WHERE backend_type=$1",
                   be_param_name, &ru_param_value, &ca_param_value);
@@ -377,12 +386,12 @@ main(int argc, char **argv)
 
 
     do_exec00(conn_p, "SELECT pg_switch_wal();");
-
     do_exec(conn_p, "checkpoint;");
 
     command = build_string("ALTER SYSTEM SET primary_conninfo='host=%s port=%s user=%s'", ca_param_value, port_s, ru_param_value);
     printf("command=%s\n", command);
     do_exec(conn_p, command);
+    do_disconnect(conn_p);
 
     do_system("pg_ctl stop");
 
@@ -391,7 +400,6 @@ main(int argc, char **argv)
 
     do_system("pg_ctl start");
 
-    do_disconnect(conn_p);
 
     /*
      * STANDBY
