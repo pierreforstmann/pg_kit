@@ -10,18 +10,29 @@
  *
  */
 
-#ifdef WIN32
-#include <windows.h>
-#endif
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/types.h>
+#include <getopt.h>
 #include "libpq-fe.h"
 
 #define MAX_LENGTH 128
+
+int verbose;
+
+static void usage(void)
+{
+	printf(("pg_so \n\n"));
+	printf(("Usage:\n"));
+	printf(("  pg_so [OPTION]...\n\n"));
+	printf(("Options:\n"));
+	printf(("  -p, --port \n"));
+	printf(("  -v, --verbose \n"));
+	printf(("\n"));
+}
+
 
 static void abort_nicely()
 {
@@ -255,7 +266,6 @@ static char* do_exec11(PGconn *conn, char *query, char *param)
     {
         for (j = 0; j < nFields; j++)
 	{
-            printf("%-15s", PQgetvalue(res, i, j));
 	    if (i == 0 && j == 0)
 		   strcpy(result, PQgetvalue(res, i, j)); 
 	}
@@ -314,7 +324,6 @@ static int do_exec12(PGconn *conn, char *query, char *param, char **param_out_1,
     {
         for (j = 0; j < nFields; j++)
 	{
-            printf("%-15s", PQgetvalue(res, i, j));
 	    if (i == 0 && j == 0)
 		   strcpy(*param_out_1, PQgetvalue(res, i, j)); 
 	    if (i == 0 && j == 1)
@@ -344,18 +353,50 @@ main(int argc, char **argv)
     char *ca_param_value;
     char *be_param_name = "walsender";
     char *command;
-    char port_s[5];
+    char port_s[MAX_LENGTH] = "";
     int rc;
 
-    if (argc > 2)
+    static struct option long_options[] = 
     {
-	    fprintf(stderr, "usage: pg_so [<standby_port] \n");
-	    exit(1);
+		{"port", required_argument, NULL, 'p'},
+		{"verbose", no_argument, NULL, 'v'},
+		{NULL, 0, NULL, 0}
+    };
+
+    int c;
+    int optindex = 0;
+
+    verbose = 0;
+
+    if (argc > 1)
+    {
+		if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-?") == 0)
+		{
+			usage();
+			exit(0);
+		}
     }
 
-    if (argc == 1)
-	 strcpy(port_s, "5432");
-    else strcpy(port_s, argv[1]);
+    while (( c = getopt_long(argc, argv, "p:v", long_options, &optindex)) != -1)
+    {
+		switch (c)
+		{
+	            case 'p':
+			        strcpy(port_s, optarg);
+                                break;
+                    case 'v':
+				verbose = 1;
+				break;
+		    default:
+				fprintf(stderr, "Try \"pg_so --help\" for more information.\n");
+				abort_nicely();
+				break;
+		}
+    }
+
+
+    if (strlen(port_s) == 0)
+	strcpy(port_s, "5432");
 
     /*
      * PRIMARY
@@ -365,11 +406,13 @@ main(int argc, char **argv)
 
     dd_param_name = build_string("data_directory", NULL, NULL, NULL);
   
+    if (verbose)
+	    printf("get PGDATA from local primary");
     dd_param_value = do_exec11(conn_p,  
                               "SELECT setting FROM pg_settings WHERE name=$1",
 			      dd_param_name);
-
-    printf("dd_param_value=%s\n", dd_param_value);
+    if (verbose)
+	    printf("local PGDATA=%s\n...done.", dd_param_value);
 
     ru_param_value = build_string0();
     ca_param_value = build_string0();
@@ -385,20 +428,44 @@ main(int argc, char **argv)
     }    
 
 
+    if (verbose)
+	    printf("switch WAL on local primary ...\n");
     do_exec00(conn_p, "SELECT pg_switch_wal();");
-    do_exec(conn_p, "checkpoint;");
+    if (verbose)
+	    printf("... done.\n");
 
+    if (verbose)
+	    printf("checkpoint on local primary ...\n");
+    do_exec(conn_p, "checkpoint;");
+    if (verbose)
+	    printf("... done.\n");
+
+    if (verbose)
+	    printf("set primary_conninfo on local primary ...\n");
     command = build_string("ALTER SYSTEM SET primary_conninfo='host=%s port=%s user=%s'", ca_param_value, port_s, ru_param_value);
-    printf("command=%s\n", command);
     do_exec(conn_p, command);
+    if (verbose)
+	    printf("... done.\n");
     do_disconnect(conn_p);
 
+    if (verbose)
+	    printf("stop local primary ...\n");
     do_system("pg_ctl stop");
+    if (verbose)
+	    printf("... done.\n");
 
+    if (verbose)
+	    printf("create local standby.signal ...\n");
     command = build_string("touch %s/standby.signal", dd_param_value, NULL, NULL);
     do_system(command);
+    if (verbose)
+	    printf("... done.\n");
 
+    if (verbose)
+	    printf("restart old primary as new standby...\n");
     do_system("pg_ctl start");
+    if (verbose)
+	    printf("... done.\n");
 
 
     /*
@@ -406,7 +473,11 @@ main(int argc, char **argv)
      */
 
     conn_s = do_remote_connect(ca_param_value, port_s);
+    if (verbose)
+	    printf("promote old standby as new primary...\n");
     do_exec00(conn_s, "SELECT pg_promote();");
+    if (verbose)
+	    printf("... done.\n");
 
     return 0;
 }
